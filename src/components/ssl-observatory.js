@@ -145,7 +145,8 @@ function SSLObservatory() {
   this.testProxySettings();
 
   this.loadCertWhitelist();
-  this.maybeUpdateCertWhitelist();
+  // empty callback
+  this.maybeUpdateCertWhitelist(function() {});
 
   this.log(DBUG, "Loaded observatory component!");
 }
@@ -411,12 +412,19 @@ SSLObservatory.prototype = {
   },
 
   submitCertChainForChannel: function(certchain, channel, warning) {
+    // asynchronously plan a submission, after possibly updating the cert
+    // whitelist
     if (!certchain) {
       return;
     }
+    var callback = function() {
+       reallySubmitCertChainForChannel(certchain, channel, warning);
+    };
+    this.maybeUpdateCertWhitelist(callback);
+  },
 
-    this.maybeUpdateCertWhitelist();
-
+  reallySubmitCertChainForChannel: function(certchain, channel, warning) {
+    // The synchronous portion of submitCertChainForChannel
     var host_ip = "-1";
     var httpchannelinternal = channel.QueryInterface(Ci.nsIHttpChannelInternal);
     try {
@@ -546,7 +554,7 @@ SSLObservatory.prototype = {
     var data = this.HTTPSEverywhere.rw.write(file, store);
   },
 
-  maybeUpdateCertWhitelist: function() {
+  maybeUpdateCertWhitelist: function(callback) {
     // We aim to update the cert whitelist every 1-3 days
     var due_pref = "extensions.https_everywhere._observatory.whitelist_update_due";
     var update_due = this.prefs.getIntPref(due_pref);
@@ -557,20 +565,21 @@ SSLObservatory.prototype = {
     if (update_due == 0) {
        // first run
        this.prefs.setIntPref(due_pref, next);
-       return;
+       return callback() && null;
     }
-    if (now < update_due) return;
+    if (now < update_due) return callback() && null;
 
     // Updating the certlist might yet fail.  But that's okay, we can
     // always live with a slightly older one.
     this.prefs.setIntPref(due_pref,next);
     this.log(INFO, "Next whitelist update due at " + next);
 
-    this.updateCertWhitelist();
+    this.updateCertWhitelist(callback);
   },
 
-  updateCertWhitelist: function() {
+  updateCertWhitelist: function(callback) {
     // Fetch a new certificate whitelist by XHR and save it to disk
+    // when that's done, execute the callback
     var req = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"]
                  .createInstance(Ci.nsIXMLHttpRequest);
 
@@ -582,7 +591,7 @@ SSLObservatory.prototype = {
       if (req.status == 200) {
         if (typeof req.response != "object") {
           that.log(WARN, "INSUFFICIENT WHITELIST OBJECTIVITY");
-          return false;
+          return callback() && false;
         }
         var whitelist = req.response;
         var c = 0;
@@ -590,12 +599,12 @@ SSLObservatory.prototype = {
           c++;
           if (typeof hash != "string" || hash.length != HASHLENGTH ) {
             that.log(WARN, "UNACCEPTABLE WHITELIST HASH " + hash);
-            return false;
+            return callback() && false;
           }
         }
         if (c < MIN_WHITELIST || c > MAX_WHITELIST) {
           that.log(WARN, "Invalid chain whitelist of size " + c);
-          return false;
+          return callback() && false;
         }
         that.log(WARN, "Routine update of SSL Observatory cert whitelist");
         that.whitelist = whitelist;
@@ -603,8 +612,9 @@ SSLObservatory.prototype = {
         that.saveCertWhitelist();
       } else {
         that.log(NOTE, "Unexpected response status " + req.status + " fetching chain whitelist");
-        return false;
+        return callback() && false;
       }
+      callback();
     }
     req.send();
   },
